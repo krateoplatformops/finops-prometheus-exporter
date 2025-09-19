@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -22,7 +21,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	finopsdatatypes "github.com/krateoplatformops/finops-data-types/api/v1"
-	configmetrics "github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/config"
 	"github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/helpers/kube/endpoints"
 	"github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/helpers/kube/httpcall"
 )
@@ -121,7 +119,16 @@ func makeAPIRequest(config finopsdatatypes.ExporterScraperConfig, endpoint *http
 
 	if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "application/json") {
 		log.Logger.Info().Msg("Detected json content-type")
-		jsonDataParsed, err := utils.TryParseResponseAsFocusJSON(utils.TrapBOM(data))
+		var jsonDataParsed []byte
+		if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" {
+			jsonDataParsed, err = utils.TryParseResponseAsFocusJSON(utils.TrapBOM(data))
+		} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
+			jsonDataParsed, err = utils.TryParseResponseAsMetricsJSON(utils.TrapBOM(data), config)
+		} else {
+			log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
+			return nil
+		}
+
 		if err != nil {
 			log.Logger.Warn().Err(err).Msg("an error has occured while parsing json data")
 		}
@@ -133,48 +140,13 @@ func makeAPIRequest(config finopsdatatypes.ExporterScraperConfig, endpoint *http
 	return nil
 }
 
-func getFOCUSRecordsFromFile(data []byte) [][]string {
+func getRecordsFromFile(data []byte) [][]string {
 	reader := csv.NewReader(bytes.NewReader(data))
 	reader.LazyQuotes = true
 
 	records, err := reader.ReadAll()
 	if err != nil {
 		log.Logger.Warn().Err(err).Msg("error while reading file")
-		return nil
-	}
-
-	return records
-}
-
-func getUsageRecordsFromFile(byteData []byte, config finopsdatatypes.ExporterScraperConfig) [][]string {
-	data := configmetrics.Metrics{}
-	err := json.Unmarshal(byteData, &data)
-	if err != nil {
-		log.Logger.Error().Err(err).Msg("error decoding response")
-		if e, ok := err.(*json.SyntaxError); ok {
-			log.Logger.Error().Msgf("syntax error at byte offset %d", e.Offset)
-		}
-		log.Logger.Info().Msgf("response: %q", byteData)
-		log.Logger.Error().Err(err).Msg("error while reading file")
-		return nil
-	}
-
-	stringCSV := "ResourceId,metricName,timestamp,average,unit\n"
-	for _, value := range data.Value {
-		for _, timeseries := range value.Timeseries {
-			for _, metric := range timeseries.Data {
-				stringCSV += config.Spec.ExporterConfig.AdditionalVariables["ResourceId"] + "," + value.Name.Value + "," + metric.Timestamp.Format(time.RFC3339) + "," + metric.Average.AsDec().String() + "," + value.Unit + "\n"
-			}
-		}
-	}
-
-	stringCSV = strings.TrimSuffix(stringCSV, "\n")
-
-	reader := csv.NewReader(strings.NewReader(stringCSV))
-
-	records, err := reader.ReadAll()
-	if err != nil {
-		log.Logger.Error().Err(err).Msg("error while reading file")
 		return nil
 	}
 
@@ -190,16 +162,7 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 			continue
 		}
 		data := makeAPIRequest(config, endpoint)
-		var records [][]string
-		if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" {
-			records = getFOCUSRecordsFromFile(data)
-		} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
-			records = getUsageRecordsFromFile(data, config)
-		} else {
-			log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
-			time.Sleep(5 * time.Second)
-			continue
-		}
+		records := getRecordsFromFile(data)
 
 		// Obtain various indexes
 		// BilledCost for value of metric
@@ -213,7 +176,11 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 			}
 		} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
 			valueIndex = 3
-		} // There is no else here, because we cannot arrive here if we get the else condition from the same test above
+		} else {
+			log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
+			time.Sleep(5 * time.Second)
+			continue
+		}
 
 		notFound := true
 		log.Info().Msgf("Analyzing %d records...", len(records))

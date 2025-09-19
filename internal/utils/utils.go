@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	finopsdatatypes "github.com/krateoplatformops/finops-data-types/api/v1"
+	configmetrics "github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/config"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,12 +40,38 @@ func TryParseResponseAsFocusJSON(jsonData []byte) ([]byte, error) {
 		return []byte{}, err
 	}
 
-	outputStr := GetOutputStr(focusConfigList)
-
-	return []byte(outputStr), nil
+	return []byte(GetOutputStrFOCUS(focusConfigList)), nil
 }
 
-func GetOutputStr(configList finopsdatatypes.FocusConfigList) string {
+func TryParseResponseAsMetricsJSON(jsonData []byte, config finopsdatatypes.ExporterScraperConfig) ([]byte, error) {
+	data := configmetrics.Metrics{}
+	err := json.Unmarshal(jsonData, &data)
+	if err != nil {
+		log.Logger.Error().Err(err).Msg("error decoding metrics response")
+		if e, ok := err.(*json.SyntaxError); ok {
+			log.Logger.Error().Msgf("syntax error at byte offset %d", e.Offset)
+		}
+		log.Logger.Info().Msgf("response: %q", jsonData)
+		log.Logger.Error().Err(err).Msg("error while reading file")
+		return nil, err
+	}
+	return []byte(GetOutputStrMetrics(data, config)), nil
+}
+
+func GetOutputStrMetrics(configList configmetrics.Metrics, config finopsdatatypes.ExporterScraperConfig) string {
+	stringCSV := "ResourceId,metricName,timestamp,average,unit\n"
+	for _, value := range configList.Value {
+		for _, timeseries := range value.Timeseries {
+			for _, metric := range timeseries.Data {
+				stringCSV += config.Spec.ExporterConfig.AdditionalVariables["ResourceId"] + "," + value.Name.Value + "," + metric.Timestamp.Format(time.RFC3339) + "," + metric.Average.AsDec().String() + "," + value.Unit + "\n"
+			}
+		}
+	}
+
+	return strings.TrimSuffix(stringCSV, "\n")
+}
+
+func GetOutputStrFOCUS(configList finopsdatatypes.FocusConfigList) string {
 	outputStr := ""
 	for i, config := range configList.Items {
 		v := reflect.ValueOf(config.Spec.FocusSpec)
