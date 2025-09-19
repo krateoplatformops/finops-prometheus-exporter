@@ -135,6 +135,29 @@ func makeAPIRequest(config finopsdatatypes.ExporterScraperConfig, endpoint *http
 		return jsonDataParsed
 	} else if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "text/csv") {
 		return utils.TrapBOM(data)
+	} else if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "application/octet-stream") {
+		log.Logger.Warn().Msgf("Generic Content-Type: %s, inferring from URL extension", strings.ToLower(res.Header.Get("Content-Type")))
+		extension := strings.Split(config.Spec.ExporterConfig.API.Path, ".")
+		switch strings.ToLower(extension[len(extension)-1]) {
+		case "csv":
+			log.Logger.Warn().Msgf("Generic Content-Type: %s, inferring from URL extension, found CSV", strings.ToLower(res.Header.Get("Content-Type")))
+			return utils.TrapBOM(data)
+		case "json":
+			log.Logger.Warn().Msgf("Generic Content-Type: %s, inferring from URL extension, found JSON", strings.ToLower(res.Header.Get("Content-Type")))
+			var jsonDataParsed []byte
+			if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" {
+				jsonDataParsed, err = utils.TryParseResponseAsFocusJSON(utils.TrapBOM(data))
+			} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
+				jsonDataParsed, err = utils.TryParseResponseAsMetricsJSON(utils.TrapBOM(data), config)
+			} else {
+				log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
+				return nil
+			}
+			if err != nil {
+				log.Logger.Warn().Err(err).Msg("an error has occured while parsing json data")
+			}
+			return jsonDataParsed
+		}
 	}
 	log.Logger.Error().Msgf("Content-Type not supported: %s", strings.ToLower(res.Header.Get("Content-Type")))
 	return nil
