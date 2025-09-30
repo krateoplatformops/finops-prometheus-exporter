@@ -192,3 +192,13 @@ func ReplaceVariables(text string, additionalVariables map[string]string) string
 
 	return text
 }
+
+func CustomJoinWihtoutX(headers []string, arrayToJoin []string, sep string) string {
+	result := ""
+	for i, value := range arrayToJoin {
+		if !strings.HasPrefix(headers[i], "x_") {
+			result += value + sep
+		}
+	}
+	return result
+}
