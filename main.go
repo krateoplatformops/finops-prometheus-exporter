@@ -15,7 +15,6 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
@@ -214,23 +213,23 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 			}
 
 			notFound = true
-			if _, ok := prometheusMetrics[strings.Join(record, " ")]; ok {
+			if _, ok := prometheusMetrics[utils.CustomJoinWihtoutX(records[0], record, " ")]; ok {
 				metricValue, err := strconv.ParseFloat(record[valueIndex], 64)
 				if err != nil {
 					log.Logger.Warn().Err(err).Msgf("skipping this record for this iteration, error while parsing metric value: %s", record[valueIndex])
 					continue
 				}
-				gaugeObj := prometheusMetrics[strings.Join(record, " ")]
+				gaugeObj := prometheusMetrics[utils.CustomJoinWihtoutX(records[0], record, " ")]
 				gaugeObj.gauge.Set(metricValue)
 				gaugeObj.thisIteration = true
-				prometheusMetrics[strings.Join(record, " ")] = gaugeObj
+				prometheusMetrics[utils.CustomJoinWihtoutX(records[0], record, " ")] = gaugeObj
 				notFound = false
 			}
 
 			if notFound {
 				labels := prometheus.Labels{}
 				for j, value := range record {
-					if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" && strings.Contains(records[0][j], "x_") {
+					if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" && strings.HasPrefix(records[0][j], "x_") {
 						continue
 					}
 					if !strings.Contains(records[0][j], "Tags") {
@@ -247,7 +246,7 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 				} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
 					name = strings.ReplaceAll(strings.ToLower(labels[records[0][1]]), " ", "_")
 				}
-				newMetricsRow := promauto.NewGauge(prometheus.GaugeOpts{
+				newMetricsRow := prometheus.NewGauge(prometheus.GaugeOpts{
 					Name:        name,
 					ConstLabels: labels,
 				})
@@ -257,7 +256,7 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 					continue
 				}
 				newMetricsRow.Set(metricValue)
-				prometheusMetrics[strings.Join(record, " ")] = recordGaugeCombo{record: record, gauge: newMetricsRow, thisIteration: true}
+				prometheusMetrics[utils.CustomJoinWihtoutX(records[0], record, " ")] = recordGaugeCombo{record: record, gauge: newMetricsRow, thisIteration: true}
 				registry.MustRegister(newMetricsRow)
 			}
 		}
