@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/utils"
+	"github.com/krateoplatformops/finops-prometheus-exporter/internal/utils"
 	"k8s.io/client-go/rest"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,8 +20,11 @@ import (
 	"gopkg.in/yaml.v3"
 
 	finopsdatatypes "github.com/krateoplatformops/finops-data-types/api/v1"
-	"github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/helpers/kube/endpoints"
-	"github.com/krateoplatformops/finops-prometheus-exporter-generic/internal/helpers/kube/httpcall"
+	localendpoints "github.com/krateoplatformops/finops-prometheus-exporter/internal/helpers/kube/endpoints"
+	localrequest "github.com/krateoplatformops/finops-prometheus-exporter/internal/helpers/kube/http/request"
+	localstatus "github.com/krateoplatformops/finops-prometheus-exporter/internal/helpers/kube/http/response"
+	"github.com/krateoplatformops/plumbing/endpoints"
+	"github.com/krateoplatformops/plumbing/http/request"
 )
 
 type recordGaugeCombo struct {
@@ -30,136 +33,99 @@ type recordGaugeCombo struct {
 	thisIteration bool
 }
 
-func ParseConfigFile(file string) (finopsdatatypes.ExporterScraperConfig, *httpcall.Endpoint, error) {
+func ParseConfigFile(file string) (finopsdatatypes.ExporterScraperConfig, *endpoints.Endpoint, error) {
 	fileReader, err := os.OpenFile(file, os.O_RDONLY, 0600)
 	if err != nil {
-		return finopsdatatypes.ExporterScraperConfig{}, &httpcall.Endpoint{}, err
+		return finopsdatatypes.ExporterScraperConfig{}, &endpoints.Endpoint{}, err
 	}
 	defer fileReader.Close()
 	data, err := io.ReadAll(fileReader)
 	if err != nil {
-		return finopsdatatypes.ExporterScraperConfig{}, &httpcall.Endpoint{}, err
+		return finopsdatatypes.ExporterScraperConfig{}, &endpoints.Endpoint{}, err
 	}
 
 	parse := finopsdatatypes.ExporterScraperConfig{}
 
 	err = yaml.Unmarshal(data, &parse)
 	if err != nil {
-		return finopsdatatypes.ExporterScraperConfig{}, &httpcall.Endpoint{}, err
+		return finopsdatatypes.ExporterScraperConfig{}, &endpoints.Endpoint{}, err
 	}
-
-	rc, _ := rest.InClusterConfig()
-	endpoint, err := endpoints.Resolve(context.Background(), endpoints.ResolveOptions{
-		RESTConfig: rc,
-		API:        &parse.Spec.ExporterConfig.API,
-	})
-	if err != nil {
-		return finopsdatatypes.ExporterScraperConfig{}, &httpcall.Endpoint{}, err
-	}
-
-	// Replace variables in server URL
-	endpoint.ServerURL = utils.ReplaceVariables(endpoint.ServerURL, parse.Spec.ExporterConfig.AdditionalVariables)
 
 	// Replace variables in API path
 	parse.Spec.ExporterConfig.API.Path = utils.ReplaceVariables(parse.Spec.ExporterConfig.API.Path, parse.Spec.ExporterConfig.AdditionalVariables)
 
-	return parse, endpoint, nil
+	rc, _ := rest.InClusterConfig()
+
+	endpoint, err := localendpoints.FromSecret(context.Background(), rc, parse.Spec.ExporterConfig.API.EndpointRef)
+	if err != nil {
+		return finopsdatatypes.ExporterScraperConfig{}, &endpoints.Endpoint{}, err
+	}
+	// Replace variables in server URL
+	endpoint.ServerURL = utils.ReplaceVariables(endpoint.ServerURL, parse.Spec.ExporterConfig.AdditionalVariables)
+	return parse, &endpoint, nil
+
 }
 
-func makeAPIRequest(config finopsdatatypes.ExporterScraperConfig, endpoint *httpcall.Endpoint) []byte {
-	res := &http.Response{StatusCode: 500}
-	var err_call error
-	firstIteration := true
-	for ok := true; ok; ok = (firstIteration || err_call != nil || res.StatusCode != 200) {
-		firstIteration = false
+func makeAPIRequest(config finopsdatatypes.ExporterScraperConfig, endpoint *endpoints.Endpoint) []byte {
+	res := &localstatus.Status{Code: 500}
+	var err error
+	var bodyData []byte
 
-		httpClient, err := httpcall.HTTPClientForEndpoint(endpoint)
-		if err != nil {
-			log.Logger.Warn().Err(err).Msg("error while creating HTTP client")
-		}
-
-		res, err_call = httpcall.Do(context.TODO(), httpClient, httpcall.Options{
-			API:      &config.Spec.ExporterConfig.API,
+	for ok := true; ok; ok = (res.Code != 200) {
+		opts := request.RequestOptions{
 			Endpoint: endpoint,
-		})
+			RequestInfo: request.RequestInfo{
+				Path:    config.Spec.ExporterConfig.API.Path,
+				Verb:    &config.Spec.ExporterConfig.API.Verb,
+				Headers: config.Spec.ExporterConfig.API.Headers,
+				Payload: &config.Spec.ExporterConfig.API.Payload,
+			},
+			ResponseHandler: func(rc io.ReadCloser) error {
+				bodyData, _ = io.ReadAll(rc)
+				return nil
+			},
+		}
+		// log.Info().Msgf("Parsed Endpoint awsAccessKey: %s", opts.Endpoint.AwsAccessKey)
+		// log.Info().Msgf("Parsed Endpoint awsSecretKey: %s", opts.Endpoint.AwsSecretKey)
+		// log.Info().Msgf("Parsed Endpoint awsRegion: %s", opts.Endpoint.AwsRegion)
+		// log.Info().Msgf("Parsed Endpoint awsService: %s", opts.Endpoint.AwsService)
 
-		if err_call == nil && res.StatusCode != 200 {
-			log.Warn().Msgf("Received status code %d", res.StatusCode)
-			bodyData, _ := io.ReadAll(res.Body)
+		// log.Info().Msgf("Endpoint HasAwsAuth: %t", opts.Endpoint.HasAwsAuth())
+
+		res = localrequest.Do(context.Background(), opts)
+
+		if res.Code != 200 {
+			log.Warn().Msgf("Received status code %d", res.Code)
 			log.Warn().Msgf("Body %s", string(bodyData))
-		} else {
-			log.Logger.Warn().Err(err_call).Msg("error occurred while making API call")
-		}
-		log.Logger.Warn().Msgf("Retrying connection in 5s...")
-		time.Sleep(5 * time.Second)
 
-		log.Logger.Info().Msgf("Parsing Endpoint again...")
-		rc, _ := rest.InClusterConfig()
-		endpoint, err = endpoints.Resolve(context.Background(), endpoints.ResolveOptions{
-			RESTConfig: rc,
-			API:        &config.Spec.ExporterConfig.API,
-		})
-		if err != nil {
-			continue
+			log.Logger.Warn().Msgf("Retrying connection in 5s...")
+			time.Sleep(5 * time.Second)
+
+			log.Logger.Info().Msgf("Parsing Endpoint again...")
+			rc, _ := rest.InClusterConfig()
+			endpoint, err := localendpoints.FromSecret(context.Background(), rc, config.Spec.ExporterConfig.API.EndpointRef)
+			if err != nil {
+				continue
+			}
+			endpoint.ServerURL = utils.ReplaceVariables(endpoint.ServerURL, config.Spec.ExporterConfig.AdditionalVariables)
 		}
-		endpoint.ServerURL = utils.ReplaceVariables(endpoint.ServerURL, config.Spec.ExporterConfig.AdditionalVariables)
 	}
 
-	defer res.Body.Close()
-
-	data, err := io.ReadAll(res.Body)
-	if err != nil {
-		log.Logger.Warn().Err(err).Msg("an error has occured while reading response body")
-	}
+	data := bodyData
 
 	// "Content-Encoding: gzip" is automatically handlded by go's HTTP transport
 	log.Logger.Debug().Msgf("Content-Type: %s", strings.ToLower(res.Header.Get("Content-Type")))
 	log.Logger.Debug().Msgf("Content-Length: %s", strings.ToLower(res.Header.Get("Content-Length")))
 
-	if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "application/json") {
-		log.Logger.Info().Msg("Detected json content-type")
-		var jsonDataParsed []byte
-		if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" {
-			jsonDataParsed, err = utils.TryParseResponseAsFocusJSON(utils.TrapBOM(data))
-		} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
-			jsonDataParsed, err = utils.TryParseResponseAsMetricsJSON(utils.TrapBOM(data), config)
-		} else {
-			log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
-			return nil
-		}
-
-		if err != nil {
-			log.Logger.Warn().Err(err).Msg("an error has occured while parsing json data")
-		}
-		return jsonDataParsed
-	} else if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "text/csv") {
-		return utils.TrapBOM(data)
-	} else if strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "application/octet-stream") {
-		log.Logger.Warn().Msgf("Generic Content-Type: %s, inferring from URL extension", strings.ToLower(res.Header.Get("Content-Type")))
-		extension := strings.Split(config.Spec.ExporterConfig.API.Path, ".")
-		switch strings.ToLower(extension[len(extension)-1]) {
-		case "csv":
-			log.Logger.Warn().Msgf("Generic Content-Type: %s, inferring from URL extension, found CSV", strings.ToLower(res.Header.Get("Content-Type")))
-			return utils.TrapBOM(data)
-		case "json":
-			log.Logger.Warn().Msgf("Generic Content-Type: %s, inferring from URL extension, found JSON", strings.ToLower(res.Header.Get("Content-Type")))
-			var jsonDataParsed []byte
-			if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "cost" {
-				jsonDataParsed, err = utils.TryParseResponseAsFocusJSON(utils.TrapBOM(data))
-			} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
-				jsonDataParsed, err = utils.TryParseResponseAsMetricsJSON(utils.TrapBOM(data), config)
-			} else {
-				log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
-				return nil
-			}
-			if err != nil {
-				log.Logger.Warn().Err(err).Msg("an error has occured while parsing json data")
-			}
-			return jsonDataParsed
-		}
+	handler, ok := utils.GetHandler(strings.ToLower(res.Header.Get("Content-Type")))
+	if !ok {
+		log.Error().Err(err).Msgf("Content-Type not supported: %s", strings.ToLower(res.Header.Get("Content-Type")))
 	}
-	log.Logger.Error().Msgf("Content-Type not supported: %s", strings.ToLower(res.Header.Get("Content-Type")))
-	return nil
+	jsonDataParsed, err := handler.Resolve(config, utils.TrapBOM(data))
+	if err != nil {
+		log.Error().Err(err).Msg("error resolving data")
+	}
+	return jsonDataParsed
 }
 
 func getRecordsFromFile(data []byte) [][]string {

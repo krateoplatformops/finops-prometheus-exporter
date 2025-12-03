@@ -11,11 +11,13 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const (
-	resourceName = "secrets"
-)
+type ClientOptions struct {
+	Cli       *rest.RESTClient
+	Name      string
+	Namespace string
+}
 
-func NewClient(rc *rest.Config) (*Client, error) {
+func NewSecretsRESTClient(rc *rest.Config) (*rest.RESTClient, error) {
 	gv := schema.GroupVersion{
 		Group:   "",
 		Version: "v1",
@@ -53,29 +55,17 @@ func NewClient(rc *rest.Config) (*Client, error) {
 		return nil, err
 	}
 
-	pc := runtime.NewParameterCodec(s)
+	//pc := runtime.NewParameterCodec(s)
 
-	return &Client{rc: cli, pc: pc}, nil
+	return cli, nil
 }
 
-type Client struct {
-	rc rest.Interface
-	pc runtime.ParameterCodec
-	ns string
-}
-
-func (c *Client) Namespace(ns string) *Client {
-	c.ns = ns
-	return c
-}
-
-func (c *Client) Get(ctx context.Context, name string, options metav1.GetOptions) (result *corev1.Secret, err error) {
+func GetSecret(ctx context.Context, opts ClientOptions) (result *corev1.Secret, err error) {
 	result = &corev1.Secret{}
-	err = c.rc.Get().
-		Namespace(c.ns).
-		Resource(resourceName).
-		Name(name).
-		VersionedParams(&options, c.pc).
+	err = opts.Cli.Get().
+		Namespace(opts.Namespace).
+		Resource("secrets").
+		Name(opts.Name).
 		Do(ctx).
 		Into(result)
 	return
