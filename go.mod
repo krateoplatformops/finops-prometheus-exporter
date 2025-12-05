@@ -55,7 +55,7 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/krateoplatformops/finops-data-types v0.0.0-20250307112147-b1c646657cff
+	github.com/krateoplatformops/finops-data-types v0.0.0-20251204131807-da92e19b99ff
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.55.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
