@@ -164,6 +164,12 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 			}
 		} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
 			valueIndex = 3
+		} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "generic" {
+			if config.Spec.ExporterConfig.Generic != nil {
+				valueIndex = config.Spec.ExporterConfig.Generic.ValueColumnIndex
+			} else {
+				log.Logger.Error().Err(err).Msg("Generic object cannot be null with generic metric type, halting")
+			}
 		} else {
 			log.Logger.Error().Err(err).Msgf("Unknow metric type: %s, trying again in 5s...", config.Spec.ExporterConfig.MetricType)
 			time.Sleep(5 * time.Second)
@@ -211,6 +217,8 @@ func updatedMetrics(registry *prometheus.Registry, prometheusMetrics map[string]
 					name = "billed_cost"
 				} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
 					name = strings.ReplaceAll(strings.ToLower(labels[records[0][1]]), " ", "_")
+				} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "generic" {
+					name = config.Spec.ExporterConfig.Generic.MetricName
 				}
 				newMetricsRow := prometheus.NewGauge(prometheus.GaugeOpts{
 					Name:        name,
