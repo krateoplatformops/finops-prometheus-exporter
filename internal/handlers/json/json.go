@@ -19,8 +19,10 @@ func (r *JsonHandler) Resolve(config finopsdatatypes.ExporterScraperConfig, data
 		jsonDataParsed, err = helpers.TryParseResponseAsFocusJSON(data)
 	} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
 		jsonDataParsed, err = helpers.TryParseResponseAsMetricsJSON(data, config)
+	} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "generic" {
+		jsonDataParsed, err = helpers.TryParseUnknownJSONToCSV(data, config)
 	} else {
-		return nil, fmt.Errorf("unknow metric type: %s, trying again in 5s", config.Spec.ExporterConfig.MetricType)
+		return nil, fmt.Errorf("could not handle metric type: %s, trying again in 5s", config.Spec.ExporterConfig.MetricType)
 	}
 
 	if err != nil {
