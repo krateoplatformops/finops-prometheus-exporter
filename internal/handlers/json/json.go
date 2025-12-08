@@ -20,7 +20,12 @@ func (r *JsonHandler) Resolve(config finopsdatatypes.ExporterScraperConfig, data
 	} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "resource" {
 		jsonDataParsed, err = helpers.TryParseResponseAsMetricsJSON(data, config)
 	} else if strings.ToLower(config.Spec.ExporterConfig.MetricType) == "generic" {
-		jsonDataParsed, err = helpers.TryParseUnknownJSONToCSV(data, config)
+		jsonDataParsed, err = helpers.TryParseUnknownJSONToPrometheusCSV(data, config)
+		if err != nil {
+			// If Prometheus parsing fails, fall back to generic parser
+			log.Logger.Debug().Msg("Prometheus parsing failed, trying generic JSON parser")
+			jsonDataParsed, err = helpers.TryParseUnknownJSONToCSV(data, config)
+		}
 	} else {
 		return nil, fmt.Errorf("could not handle metric type: %s, trying again in 5s", config.Spec.ExporterConfig.MetricType)
 	}

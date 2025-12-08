@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -193,4 +194,218 @@ func GetStringValue(value any) string {
 	}
 
 	return ""
+}
+
+// Prometheus parsing
+
+// PrometheusResponse represents the top-level Prometheus API response
+type PrometheusResponse struct {
+	Status string         `json:"status"`
+	Data   PrometheusData `json:"data"`
+}
+
+// PrometheusData contains the result type and results array
+type PrometheusData struct {
+	ResultType string             `json:"resultType"`
+	Result     []PrometheusResult `json:"result"`
+}
+
+// PrometheusResult represents a single metric result
+type PrometheusResult struct {
+	Metric map[string]string `json:"metric"`
+	Value  []interface{}     `json:"value,omitempty"`  // For instant queries [timestamp, value]
+	Values [][]interface{}   `json:"values,omitempty"` // For range queries [[timestamp, value], ...]
+}
+
+// TryParseUnknownJSONToPrometheusCSV attempts to parse JSON as Prometheus format and convert to CSV
+func TryParseUnknownJSONToPrometheusCSV(jsonData []byte, config finopsdatatypes.ExporterScraperConfig) ([]byte, error) {
+	// Try to unmarshal as Prometheus format
+	var promResponse PrometheusResponse
+	err := json.Unmarshal(jsonData, &promResponse)
+	if err != nil {
+		log.Logger.Debug().Err(err).Msg("Failed to parse as Prometheus format")
+		return nil, err
+	}
+
+	// Validate it's actually Prometheus format
+	if promResponse.Status == "" || promResponse.Data.ResultType == "" {
+		return nil, fmt.Errorf("not a valid Prometheus response format")
+	}
+
+	// Convert to CSV
+	csv := PrometheusToCSV(promResponse, config)
+	if csv == "" {
+		return nil, fmt.Errorf("no data in Prometheus response")
+	}
+
+	log.Logger.Info().Msg("Successfully parsed as Prometheus format")
+	return []byte(csv), nil
+}
+
+// PrometheusToCSV converts a Prometheus response to CSV format
+func PrometheusToCSV(response PrometheusResponse, config finopsdatatypes.ExporterScraperConfig) string {
+	if len(response.Data.Result) == 0 {
+		return ""
+	}
+
+	var output strings.Builder
+
+	// Determine if we have instant or range query results
+	hasValues := len(response.Data.Result) > 0 && len(response.Data.Result[0].Values) > 0
+	hasValue := len(response.Data.Result) > 0 && len(response.Data.Result[0].Value) > 0
+
+	// Collect all unique metric labels for header
+	labelSet := make(map[string]bool)
+	for _, result := range response.Data.Result {
+		for key := range result.Metric {
+			labelSet[key] = true
+		}
+	}
+
+	// Create ordered label list and sanitized mapping for consistent column order
+	labels := make([]string, 0, len(labelSet))
+	for label := range labelSet {
+		labels = append(labels, label)
+	}
+
+	// Sort labels for consistent output
+	sort.Strings(labels)
+
+	// Create a mapping from original labels to sanitized labels, handling duplicates
+	labelMapping := make(map[string]string)
+	usedSanitized := make(map[string]int)
+
+	for _, label := range labels {
+		sanitized := sanitizePrometheusLabel(label)
+
+		// Handle duplicate sanitized names
+		if count, exists := usedSanitized[sanitized]; exists {
+			usedSanitized[sanitized] = count + 1
+			sanitized = fmt.Sprintf("%s_%d", sanitized, count)
+		} else {
+			usedSanitized[sanitized] = 1
+		}
+
+		labelMapping[label] = sanitized
+	}
+
+	// Write CSV header - value comes before timestamp
+	for _, label := range labels {
+		output.WriteString(labelMapping[label])
+		output.WriteString(",")
+	}
+	output.WriteString("value,timestamp\n")
+
+	// Process each result
+	for _, result := range response.Data.Result {
+		// Handle range queries (multiple timestamp-value pairs)
+		if hasValues {
+			for _, valuePoint := range result.Values {
+				if len(valuePoint) != 2 {
+					continue
+				}
+
+				// Write metric labels using the original label order
+				for _, label := range labels {
+					if val, exists := result.Metric[label]; exists {
+						output.WriteString(val)
+					}
+					output.WriteString(",")
+				}
+
+				// Write value and timestamp (swapped order)
+				value := formatPrometheusValue(valuePoint[1])
+				timestamp := formatPrometheusTimestamp(valuePoint[0])
+				output.WriteString(value)
+				output.WriteString(",")
+				output.WriteString(timestamp)
+				output.WriteString("\n")
+			}
+		} else if hasValue {
+			// Handle instant queries (single timestamp-value pair)
+			if len(result.Value) == 2 {
+				// Write metric labels using the original label order
+				for _, label := range labels {
+					if val, exists := result.Metric[label]; exists {
+						output.WriteString(val)
+					}
+					output.WriteString(",")
+				}
+
+				// Write value and timestamp (swapped order)
+				value := formatPrometheusValue(result.Value[1])
+				timestamp := formatPrometheusTimestamp(result.Value[0])
+				output.WriteString(value)
+				output.WriteString(",")
+				output.WriteString(timestamp)
+				output.WriteString("\n")
+			}
+		}
+	}
+
+	return strings.TrimSuffix(output.String(), "\n")
+}
+
+// formatPrometheusTimestamp converts Prometheus timestamp to RFC3339 format
+func formatPrometheusTimestamp(ts interface{}) string {
+	switch v := ts.(type) {
+	case float64:
+		// Prometheus timestamps are Unix timestamps in seconds
+		t := time.Unix(int64(v), 0)
+		return t.Format(time.RFC3339)
+	case int64:
+		t := time.Unix(v, 0)
+		return t.Format(time.RFC3339)
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// formatPrometheusValue converts Prometheus value to string
+func formatPrometheusValue(val interface{}) string {
+	switch v := val.(type) {
+	case string:
+		return v
+	case float64:
+		return fmt.Sprintf("%f", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// sanitizePrometheusLabel converts Prometheus label names to valid CSV column names
+func sanitizePrometheusLabel(label string) string {
+	// Remove leading and trailing underscores (common in Prometheus internal labels like __name__)
+	label = strings.Trim(label, "_")
+
+	// Replace remaining problematic characters
+	// Prometheus allows: [a-zA-Z_][a-zA-Z0-9_]*
+	// CSV prefers alphanumeric and underscores without leading/trailing underscores
+
+	var result strings.Builder
+	for _, r := range label {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			result.WriteRune(r)
+		} else if r == '-' {
+			// Convert hyphens to underscores
+			result.WriteRune('_')
+		} else {
+			// Replace other special characters with underscore
+			result.WriteRune('_')
+		}
+	}
+
+	sanitized := result.String()
+
+	// Ensure the result is not empty and doesn't start with a number
+	if sanitized == "" {
+		return "label"
+	}
+	if sanitized[0] >= '0' && sanitized[0] <= '9' {
+		sanitized = "label_" + sanitized
+	}
+
+	return sanitized
 }
