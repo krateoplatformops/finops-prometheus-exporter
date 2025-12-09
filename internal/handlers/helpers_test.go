@@ -147,203 +147,196 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
 }
 
 func TestTryParseUnknownJSONToPrometheusCSV(t *testing.T) {
-	// Sample Prometheus response JSON
-	jsonData := []byte(`{
-  "status": "success",
-  "data": {
-    "resultType": "vector",
-    "result": [
-      {
-        "metric": {
-          "__name__": "container_cpu_usage_seconds_total",
-          "cpu": "total",
-          "endpoint": "https-metrics",
-          "id": "/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod0c52bc54_389c_4774_9356_d4ef412ed32e.slice",
-          "instance": "172.18.0.2:10250",
-          "job": "kubelet",
-          "metrics_path": "/metrics/cadvisor",
-          "namespace": "krateo-system",
-          "node": "krateo-quickstart-worker",
-          "pod": "finops-database-handler-7877644c87-2hkrs",
-          "service": "kind-prometheus-kube-prome-kubelet"
-        },
-        "value": [
-          1765210903.436,
-          "0.744565"
-        ]
-      },
-      {
-        "metric": {
-          "__name__": "container_cpu_usage_seconds_total",
-          "cpu": "total",
-          "endpoint": "https-metrics",
-          "id": "/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod0c52bc54_389c_4774_9356_d4ef412ed32e.slice/cri-containerd-83c68e46b12c88664d61c11594f57e3795d09591e71f4190614efef32e0a8986.scope",
-          "image": "registry.k8s.io/pause:3.10",
-          "instance": "172.18.0.2:10250",
-          "job": "kubelet",
-          "metrics_path": "/metrics/cadvisor",
-          "name": "83c68e46b12c88664d61c11594f57e3795d09591e71f4190614efef32e0a8986",
-          "namespace": "krateo-system",
-          "node": "krateo-quickstart-worker",
-          "pod": "finops-database-handler-7877644c87-2hkrs",
-          "service": "kind-prometheus-kube-prome-kubelet"
-        },
-        "value": [
-          1765210903.436,
-          "0.010262"
-        ]
-      },
-      {
-        "metric": {
-          "__name__": "container_cpu_usage_seconds_total",
-          "cpu": "total",
-          "endpoint": "https-metrics",
-          "id": "/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod12e6a5d7_cb0f_42c5_b2da_94f99fb8fb31.slice",
-          "instance": "172.18.0.2:10250",
-          "job": "kubelet",
-          "metrics_path": "/metrics/cadvisor",
-          "namespace": "krateo-system",
-          "node": "krateo-quickstart-worker",
-          "pod": "finops-database-handler-uploader-57b55f468f-4h4sk",
-          "service": "kind-prometheus-kube-prome-kubelet"
-        },
-        "value": [
-          1765210903.436,
-          "2.177452"
-        ]
-      }
-    ]
-  }
-}`)
-
-	// Create a minimal config (adjust based on your actual struct definition)
-	config := finopsdatatypes.ExporterScraperConfig{}
-
-	// Parse the JSON
-	result, err := TryParseUnknownJSONToPrometheusCSV(jsonData, config)
-	if err != nil {
-		t.Fatalf("Failed to parse Prometheus JSON: %v", err)
-	}
-
-	// Parse the CSV properly
-	reader := csv.NewReader(strings.NewReader(string(result)))
-	records, err := reader.ReadAll()
-	if err != nil {
-		t.Fatalf("Failed to parse CSV: %v", err)
-	}
-
-	t.Logf("header: %s", records[0])
-
-	// Find the value and timestamp column indices
-	header := records[0]
-	valueIdx := -1
-	timestampIdx := -1
-	for i, col := range header {
-		if col == "value" {
-			valueIdx = i
-		}
-		if col == "timestamp" {
-			timestampIdx = i
-		}
-	}
-
-	if valueIdx == -1 || timestampIdx == -1 {
-		t.Fatal("Missing value or timestamp columns")
-	}
-
-	// ✅ This would catch the bug:
-	// Try to parse values in the value column as floats
-	for i := 1; i < len(records); i++ {
-		valueStr := records[i][valueIdx]
-		_, err := strconv.ParseFloat(valueStr, 64)
-		if err != nil {
-			t.Errorf("Row %d: Failed to parse value '%s' as float: %v",
-				i, valueStr, err)
-		}
-
-		// Verify timestamp is RFC3339 format
-		timestampStr := records[i][timestampIdx]
-		_, err = time.Parse(time.RFC3339, timestampStr)
-		if err != nil {
-			t.Errorf("Row %d: Failed to parse timestamp '%s' as RFC3339: %v",
-				i, timestampStr, err)
-		}
-	}
-}
-
-func TestTryParseUnknownJSONToPrometheusCSV_InvalidJSON(t *testing.T) {
-	invalidJSON := []byte(`{"not": "prometheus", "format": "at all"}`)
-	config := finopsdatatypes.ExporterScraperConfig{}
-
-	_, err := TryParseUnknownJSONToPrometheusCSV(invalidJSON, config)
-	if err == nil {
-		t.Fatal("Expected error for invalid Prometheus JSON, got nil")
-	}
-
-	t.Logf("Got expected error: %v", err)
-}
-
-func TestTryParseUnknownJSONToPrometheusCSV_EmptyResults(t *testing.T) {
-	emptyResultsJSON := []byte(`{
-		"status": "success",
-		"data": {
-			"resultType": "vector",
-			"result": []
-		}
-	}`)
-	config := finopsdatatypes.ExporterScraperConfig{}
-
-	result, err := TryParseUnknownJSONToPrometheusCSV(emptyResultsJSON, config)
-	if err == nil {
-		t.Fatal("Expected error for empty results, got nil")
-	}
-
-	t.Logf("Got expected error: %v", err)
-	t.Logf("Result: %s", string(result))
-}
-
-func TestPrometheusToCSV_RangeQuery(t *testing.T) {
-	// Test with range query format (values instead of value)
-	rangeQueryJSON := []byte(`{
-		"status": "success",
-		"data": {
-			"resultType": "matrix",
-			"result": [
-				{
-					"metric": {
-						"__name__": "test_metric",
-						"job": "test"
-					},
-					"values": [
-						[1765210903, "1.5"],
-						[1765210963, "2.5"],
-						[1765211023, "3.5"]
+	tests := []struct {
+		name       string
+		jsonInput  string
+		expectErr  bool
+		expectRows int
+	}{
+		{
+			name: "instant vector query (simple)",
+			jsonInput: `{
+				"status": "success",
+				"data": {
+					"resultType": "vector",
+					"result": [
+						{
+							"metric": { "__name__": "cpu_usage", "job": "test" },
+							"value": [1765210903.436, "0.5"]
+						}
 					]
 				}
-			]
-		}
-	}`)
+			}`,
+			expectRows: 1,
+		},
+		{
+			name: "range matrix query",
+			jsonInput: `{
+				"status": "success",
+				"data": {
+					"resultType": "matrix",
+					"result": [
+						{
+							"metric": { "__name__": "cpu_usage", "job": "test" },
+							"values": [
+								[1765210903, "1.5"],
+								[1765210963, "2.5"],
+								[1765211023, "3.5"]
+							]
+						}
+					]
+				}
+			}`,
+			expectRows: 3,
+		},
+		{
+			name: "real prometheus payload (kubelet cadvisor)",
+			jsonInput: `{
+				"status": "success",
+				"data": {
+					"resultType": "vector",
+					"result": [
+						{
+							"metric": {
+								"__name__": "container_cpu_usage_seconds_total",
+								"cpu": "total",
+								"endpoint": "https-metrics",
+								"id": "/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod0c52bc54_389c_4774_9356_d4ef412ed32e.slice",
+								"instance": "172.18.0.2:10250",
+								"job": "kubelet",
+								"metrics_path": "/metrics/cadvisor",
+								"namespace": "krateo-system",
+								"node": "krateo-quickstart-worker",
+								"pod": "finops-database-handler-7877644c87-2hkrs",
+								"service": "kind-prometheus-kube-prome-kubelet"
+							},
+							"value": [1765210903.436, "0.744565"]
+						},
+						{
+							"metric": {
+								"__name__": "container_cpu_usage_seconds_total",
+								"cpu": "total",
+								"endpoint": "https-metrics",
+								"id": "/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod0c52bc54_389c_4774_9356_d4ef412ed32e.slice/cri-containerd-83c68e46b12c88664d61c11594f57e3795d09591e71f4190614efef32e0a8986.scope",
+								"image": "registry.k8s.io/pause:3.10",
+								"instance": "172.18.0.2:10250",
+								"job": "kubelet",
+								"metrics_path": "/metrics/cadvisor",
+								"name": "83c68e46b12c88664d61c11594f57e3795d09591e71f4190614efef32e0a8986",
+								"namespace": "krateo-system",
+								"node": "krateo-quickstart-worker",
+								"pod": "finops-database-handler-7877644c87-2hkrs",
+								"service": "kind-prometheus-kube-prome-kubelet"
+							},
+							"value": [1765210903.436, "0.010262"]
+						},
+						{
+							"metric": {
+								"__name__": "container_cpu_usage_seconds_total",
+								"cpu": "total",
+								"endpoint": "https-metrics",
+								"id": "/kubelet.slice/kubelet-kubepods.slice/kubelet-kubepods-besteffort.slice/kubelet-kubepods-besteffort-pod12e6a5d7_cb0f_42c5_b2da_94f99fb8fb31.slice",
+								"instance": "172.18.0.2:10250",
+								"job": "kubelet",
+								"metrics_path": "/metrics/cadvisor",
+								"namespace": "krateo-system",
+								"node": "krateo-quickstart-worker",
+								"pod": "finops-database-handler-uploader-57b55f468f-4h4sk",
+								"service": "kind-prometheus-kube-prome-kubelet"
+							},
+							"value": [1765210903.436, "2.177452"]
+						}
+					]
+				}
+			}`,
+			expectRows: 3,
+		},
+		{
+			name: "invalid prometheus json",
+			jsonInput: `{
+				"status": "success",
+				"data": {
+					"resultType": "vector"
+				}
+			}`,
+			expectErr: true,
+		},
+		{
+			name:      "not prometheus json",
+			jsonInput: `{"foo":"bar"}`,
+			expectErr: true,
+		},
+		{
+			name: "empty results",
+			jsonInput: `{
+				"status": "success",
+				"data": {
+					"resultType": "vector",
+					"result": []
+				}
+			}`,
+			expectErr: true,
+		},
+	}
 
 	config := finopsdatatypes.ExporterScraperConfig{}
-	result, err := TryParseUnknownJSONToPrometheusCSV(rangeQueryJSON, config)
-	if err != nil {
-		t.Fatalf("Failed to parse range query: %v", err)
-	}
 
-	csvOutput := string(result)
-	t.Logf("Range Query CSV Output:\n%s", csvOutput)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := TryParseUnknownJSONToPrometheusCSV([]byte(tt.jsonInput), config)
 
-	// Verify we have 3 data rows for the 3 timestamps
-	lines := strings.Split(csvOutput, "\n")
-	if len(lines) != 4 { // header + 3 data rows
-		t.Errorf("Expected 4 lines for range query, got %d", len(lines))
-	}
+			if tt.expectErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
 
-	// Verify all three values are present
-	expectedValues := []string{"1.5", "2.5", "3.5"}
-	for _, val := range expectedValues {
-		if !strings.Contains(csvOutput, val) {
-			t.Errorf("Expected value %s not found in range query output", val)
-		}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			r := csv.NewReader(strings.NewReader(string(result)))
+			records, err := r.ReadAll()
+			if err != nil {
+				t.Fatalf("invalid CSV: %v", err)
+			}
+
+			if len(records)-1 != tt.expectRows {
+				t.Fatalf("expected %d rows, got %d", tt.expectRows, len(records)-1)
+			}
+
+			header := records[0]
+			valueIdx, tsIdx := -1, -1
+
+			for i, h := range header {
+				if h == "value" {
+					valueIdx = i
+				}
+				if h == "timestamp" {
+					tsIdx = i
+				}
+			}
+
+			if valueIdx == -1 || tsIdx == -1 {
+				t.Fatalf("missing value or timestamp columns")
+			}
+
+			for i := 1; i < len(records); i++ {
+				row := records[i]
+
+				if len(row) != len(header) {
+					t.Fatalf("row %d column mismatch", i)
+				}
+
+				if _, err := strconv.ParseFloat(row[valueIdx], 64); err != nil {
+					t.Fatalf("row %d invalid value: %v", i, err)
+				}
+
+				if _, err := time.Parse(time.RFC3339Nano, row[tsIdx]); err != nil {
+					t.Fatalf("row %d invalid timestamp: %v", i, err)
+				}
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -198,214 +199,204 @@ func GetStringValue(value any) string {
 
 // Prometheus parsing
 
-// PrometheusResponse represents the top-level Prometheus API response
 type PrometheusResponse struct {
 	Status string         `json:"status"`
 	Data   PrometheusData `json:"data"`
 }
 
-// PrometheusData contains the result type and results array
 type PrometheusData struct {
 	ResultType string             `json:"resultType"`
 	Result     []PrometheusResult `json:"result"`
 }
 
-// PrometheusResult represents a single metric result
 type PrometheusResult struct {
 	Metric map[string]string `json:"metric"`
-	Value  []interface{}     `json:"value,omitempty"`  // For instant queries [timestamp, value]
-	Values [][]interface{}   `json:"values,omitempty"` // For range queries [[timestamp, value], ...]
+	Value  []interface{}     `json:"value,omitempty"`
+	Values [][]interface{}   `json:"values,omitempty"`
 }
 
-// TryParseUnknownJSONToPrometheusCSV attempts to parse JSON as Prometheus format and convert to CSV
-func TryParseUnknownJSONToPrometheusCSV(jsonData []byte, config finopsdatatypes.ExporterScraperConfig) ([]byte, error) {
-	// Try to unmarshal as Prometheus format
-	var promResponse PrometheusResponse
-	err := json.Unmarshal(jsonData, &promResponse)
+func TryParseUnknownJSONToPrometheusCSV(
+	jsonData []byte,
+	config finopsdatatypes.ExporterScraperConfig,
+) ([]byte, error) {
+
+	var resp PrometheusResponse
+	if err := json.Unmarshal(jsonData, &resp); err != nil {
+		return nil, fmt.Errorf("not prometheus json")
+	}
+
+	// ✅ Strong validation
+	if resp.Status != "success" {
+		return nil, fmt.Errorf("not prometheus json")
+	}
+
+	if resp.Data.ResultType != "vector" && resp.Data.ResultType != "matrix" {
+		return nil, fmt.Errorf("not prometheus json")
+	}
+
+	if len(resp.Data.Result) == 0 {
+		return nil, fmt.Errorf("not prometheus json")
+	}
+
+	csvBytes, err := PrometheusToCSV(resp, config)
 	if err != nil {
-		log.Logger.Debug().Err(err).Msg("Failed to parse as Prometheus format")
 		return nil, err
 	}
 
-	// Validate it's actually Prometheus format
-	if promResponse.Status == "" || promResponse.Data.ResultType == "" {
-		return nil, fmt.Errorf("not a valid Prometheus response format")
-	}
-
-	// Convert to CSV
-	csv := PrometheusToCSV(promResponse, config)
-	if csv == "" {
-		return nil, fmt.Errorf("no data in Prometheus response")
-	}
-
-	log.Logger.Info().Msg("Successfully parsed as Prometheus format")
-	return []byte(csv), nil
+	return csvBytes, nil
 }
 
-// PrometheusToCSV converts a Prometheus response to CSV format
-func PrometheusToCSV(response PrometheusResponse, config finopsdatatypes.ExporterScraperConfig) string {
-	if len(response.Data.Result) == 0 {
-		return ""
-	}
+func PrometheusToCSV(
+	response PrometheusResponse,
+	config finopsdatatypes.ExporterScraperConfig,
+) ([]byte, error) {
 
-	var output strings.Builder
-
-	// Determine if we have instant or range query results
-	hasValues := len(response.Data.Result) > 0 && len(response.Data.Result[0].Values) > 0
-	hasValue := len(response.Data.Result) > 0 && len(response.Data.Result[0].Value) > 0
-
-	// Collect all unique metric labels for header
-	labelSet := make(map[string]bool)
-	for _, result := range response.Data.Result {
-		for key := range result.Metric {
-			labelSet[key] = true
+	// Collect unique labels
+	labelSet := map[string]struct{}{}
+	for _, r := range response.Data.Result {
+		for k := range r.Metric {
+			labelSet[k] = struct{}{}
 		}
 	}
 
-	// Create ordered label list and sanitized mapping for consistent column order
-	labels := make([]string, 0, len(labelSet))
-	for label := range labelSet {
-		labels = append(labels, label)
+	if len(labelSet) == 0 {
+		return nil, fmt.Errorf("no labels found")
 	}
 
-	// Sort labels for consistent output
+	labels := make([]string, 0, len(labelSet))
+	for l := range labelSet {
+		labels = append(labels, l)
+	}
 	sort.Strings(labels)
 
-	// Create a mapping from original labels to sanitized labels, handling duplicates
-	labelMapping := make(map[string]string)
-	usedSanitized := make(map[string]int)
+	// Sanitize headers
+	labelMap := make(map[string]string)
+	used := map[string]int{}
 
-	for _, label := range labels {
-		sanitized := sanitizePrometheusLabel(label)
-
-		// Handle duplicate sanitized names
-		if count, exists := usedSanitized[sanitized]; exists {
-			usedSanitized[sanitized] = count + 1
-			sanitized = fmt.Sprintf("%s_%d", sanitized, count)
+	for _, l := range labels {
+		s := sanitizePrometheusLabel(l)
+		if cnt, ok := used[s]; ok {
+			cnt++
+			used[s] = cnt
+			s = fmt.Sprintf("%s_%d", s, cnt)
 		} else {
-			usedSanitized[sanitized] = 1
+			used[s] = 1
 		}
-
-		labelMapping[label] = sanitized
+		labelMap[l] = s
 	}
 
-	// Write CSV header - value comes before timestamp
-	for _, label := range labels {
-		output.WriteString(labelMapping[label])
-		output.WriteString(",")
-	}
-	output.WriteString("value,timestamp\n")
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
 
-	// Process each result
+	// Header
+	header := make([]string, 0, len(labels)+2)
+	for _, l := range labels {
+		header = append(header, labelMap[l])
+	}
+	header = append(header, "value", "timestamp")
+	if err := writer.Write(header); err != nil {
+		return nil, err
+	}
+
+	// Rows
 	for _, result := range response.Data.Result {
-		// Handle range queries (multiple timestamp-value pairs)
-		if hasValues {
-			for _, valuePoint := range result.Values {
-				if len(valuePoint) != 2 {
-					continue
-				}
 
-				// Write metric labels using the original label order
-				for _, label := range labels {
-					if val, exists := result.Metric[label]; exists {
-						output.WriteString(val)
-					}
-					output.WriteString(",")
-				}
+		emitRow := func(ts, val interface{}) {
+			row := make([]string, 0, len(labels)+2)
 
-				// Write value and timestamp (swapped order)
-				value := formatPrometheusValue(valuePoint[1])
-				timestamp := formatPrometheusTimestamp(valuePoint[0])
-				output.WriteString(value)
-				output.WriteString(",")
-				output.WriteString(timestamp)
-				output.WriteString("\n")
+			for _, l := range labels {
+				row = append(row, result.Metric[l])
 			}
-		} else if hasValue {
-			// Handle instant queries (single timestamp-value pair)
-			if len(result.Value) == 2 {
-				// Write metric labels using the original label order
-				for _, label := range labels {
-					if val, exists := result.Metric[label]; exists {
-						output.WriteString(val)
-					}
-					output.WriteString(",")
-				}
 
-				// Write value and timestamp (swapped order)
-				value := formatPrometheusValue(result.Value[1])
-				timestamp := formatPrometheusTimestamp(result.Value[0])
-				output.WriteString(value)
-				output.WriteString(",")
-				output.WriteString(timestamp)
-				output.WriteString("\n")
+			row = append(row,
+				formatPrometheusValue(val),
+				formatPrometheusTimestamp(ts),
+			)
+
+			_ = writer.Write(row)
+		}
+
+		if len(result.Values) > 0 {
+			// Range query
+			for _, pair := range result.Values {
+				if len(pair) == 2 {
+					emitRow(pair[0], pair[1])
+				}
 			}
+		} else if len(result.Value) == 2 {
+			// Instant query
+			emitRow(result.Value[0], result.Value[1])
 		}
 	}
 
-	return strings.TrimSuffix(output.String(), "\n")
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// formatPrometheusTimestamp converts Prometheus timestamp to RFC3339 format
+// Helpers
+
 func formatPrometheusTimestamp(ts interface{}) string {
 	switch v := ts.(type) {
 	case float64:
-		// Prometheus timestamps are Unix timestamps in seconds
-		t := time.Unix(int64(v), 0)
-		return t.Format(time.RFC3339)
+		secs := int64(v)
+		nanos := int64((v - float64(secs)) * 1e9)
+		return time.Unix(secs, nanos).UTC().Format(time.RFC3339Nano)
 	case int64:
-		t := time.Unix(v, 0)
-		return t.Format(time.RFC3339)
+		return time.Unix(v, 0).UTC().Format(time.RFC3339Nano)
+	case string:
+		return v
 	default:
 		return fmt.Sprint(v)
 	}
 }
 
-// formatPrometheusValue converts Prometheus value to string
 func formatPrometheusValue(val interface{}) string {
 	switch v := val.(type) {
 	case string:
 		return v
 	case float64:
-		return fmt.Sprintf("%f", v)
+		return strconv.FormatFloat(v, 'g', -1, 64)
 	case int64:
-		return fmt.Sprintf("%d", v)
+		return strconv.FormatInt(v, 10)
 	default:
 		return fmt.Sprint(v)
 	}
 }
 
-// sanitizePrometheusLabel converts Prometheus label names to valid CSV column names
 func sanitizePrometheusLabel(label string) string {
-	// Remove leading and trailing underscores (common in Prometheus internal labels like __name__)
+	if label == "__name__" {
+		return "metric_name"
+	}
+
 	label = strings.Trim(label, "_")
 
-	// Replace remaining problematic characters
-	// Prometheus allows: [a-zA-Z_][a-zA-Z0-9_]*
-	// CSV prefers alphanumeric and underscores without leading/trailing underscores
-
-	var result strings.Builder
+	var b strings.Builder
 	for _, r := range label {
-		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			result.WriteRune(r)
-		} else if r == '-' {
-			// Convert hyphens to underscores
-			result.WriteRune('_')
-		} else {
-			// Replace other special characters with underscore
-			result.WriteRune('_')
+		switch {
+		case r == '_',
+			r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-':
+			b.WriteRune('_')
+		default:
+			b.WriteRune('_')
 		}
 	}
 
-	sanitized := result.String()
-
-	// Ensure the result is not empty and doesn't start with a number
-	if sanitized == "" {
+	s := b.String()
+	if s == "" {
 		return "label"
 	}
-	if sanitized[0] >= '0' && sanitized[0] <= '9' {
-		sanitized = "label_" + sanitized
+
+	if s[0] >= '0' && s[0] <= '9' {
+		s = "label_" + s
 	}
 
-	return sanitized
+	return s
 }
