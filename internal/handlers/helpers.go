@@ -85,18 +85,19 @@ func TryParseUnknownJSONToCSV(jsonData []byte, config finopsdatatypes.ExporterSc
 		found := false
 		for _, v := range wrapper {
 			arr, ok := v.([]interface{})
-			if ok {
-				for _, item := range arr {
-					m, ok := item.(map[string]interface{})
-					if !ok {
-						continue
-					}
-					arrayRecords = append(arrayRecords, m)
-					found = true
+			if !ok {
+				continue
+			}
+			for _, item := range arr {
+				m, ok := item.(map[string]interface{})
+				if !ok {
+					continue
 				}
-				if found {
-					break
-				}
+				arrayRecords = append(arrayRecords, m)
+				found = true
+			}
+			if found {
+				break
 			}
 		}
 
@@ -111,13 +112,21 @@ func TryParseUnknownJSONToCSV(jsonData []byte, config finopsdatatypes.ExporterSc
 		return []byte(""), nil
 	}
 
-	var b strings.Builder
-	w := csv.NewWriter(&b)
+	keySet := make(map[string]struct{})
+	for _, rec := range arrayRecords {
+		for k := range rec {
+			keySet[k] = struct{}{}
+		}
+	}
 
-	header := make([]string, 0, len(arrayRecords[0]))
-	for k := range arrayRecords[0] {
+	header := make([]string, 0, len(keySet))
+	for k := range keySet {
 		header = append(header, k)
 	}
+	sort.Strings(header)
+
+	var b strings.Builder
+	w := csv.NewWriter(&b)
 
 	if err := w.Write(header); err != nil {
 		log.Logger.Error().Err(err).Msg("failed writing CSV header")
@@ -127,8 +136,8 @@ func TryParseUnknownJSONToCSV(jsonData []byte, config finopsdatatypes.ExporterSc
 	for _, rec := range arrayRecords {
 		row := make([]string, len(header))
 		for i, key := range header {
-			if rec[key] != nil {
-				row[i] = fmt.Sprint(rec[key])
+			if val, ok := rec[key]; ok && val != nil {
+				row[i] = fmt.Sprint(val)
 			}
 		}
 		if err := w.Write(row); err != nil {
@@ -138,7 +147,6 @@ func TryParseUnknownJSONToCSV(jsonData []byte, config finopsdatatypes.ExporterSc
 	}
 
 	w.Flush()
-
 	if err := w.Error(); err != nil {
 		log.Logger.Error().Err(err).Msg("CSV writer error")
 		return nil, err

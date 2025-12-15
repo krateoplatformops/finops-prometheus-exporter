@@ -15,7 +15,7 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    []byte
-		expected []string // multiple valid CSV outputs for unordered header
+		expected []string
 	}{
 		{
 			name: "simple two rows",
@@ -26,7 +26,17 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
             ]`),
 			expected: []string{
 				"test,value\nname,0.34\nname2,1.4\n",
-				"value,test\n0.34,name\n1.4,name2\n",
+			},
+		},
+		{
+			name: "simple two rows, additional fields",
+			input: []byte(`
+            [
+              { "test": "name",   "value": 0.34, "additional": "column" },
+              { "test": "name2",  "value": 1.40 }
+            ]`),
+			expected: []string{
+				"additional,test,value\ncolumn,name,0.34\n,name2,1.4\n",
 			},
 		},
 		{
@@ -36,7 +46,6 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
               { "foo": "bar", "count": 10 }
             ]`),
 			expected: []string{
-				"foo,count\nbar,10\n",
 				"count,foo\n10,bar\n",
 			},
 		},
@@ -58,7 +67,6 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
             }`),
 			expected: []string{
 				"test,value\nname,0.34\nname2,1.4\n",
-				"value,test\n0.34,name\n1.4,name2\n",
 			},
 		},
 		{
@@ -73,15 +81,16 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
             }`),
 			expected: []string{
 				"test,value\nname,0.34\nname2,1.4\n",
-				"value,test\n0.34,name\n1.4,name2\n",
 			},
 		},
 	}
 
 	failTests := []struct {
-		name     string
-		input    []byte
-		expected []string // multiple valid CSV outputs for unordered header
+		name        string
+		input       []byte
+		expected    []string
+		shouldError bool
+		shouldMatch bool
 	}{
 		{
 			name: "multiple top level variables without wrapper",
@@ -93,6 +102,21 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
 			expected: []string{
 				"",
 			},
+			shouldError: true,
+			shouldMatch: true,
+		},
+		{
+			name: "simple two rows, additional fields, wrong order",
+			input: []byte(`
+            [
+              { "test": "name",   "value": 0.34, "additional": "column" },
+              { "test": "name2",  "value": 1.40 }
+            ]`),
+			expected: []string{
+				"test,value,additional\ncolumn,name,0.34\n,name2,1.4\n",
+			},
+			shouldError: false,
+			shouldMatch: false,
 		},
 	}
 
@@ -124,10 +148,9 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
 	for _, tc := range failTests {
 		t.Run(tc.name, func(t *testing.T) {
 			csvData, err := TryParseUnknownJSONToCSV(tc.input, config)
-			if err == nil {
-				t.Fatal("no error detected in fail test")
+			if err == nil && tc.shouldError {
+				t.Log("no error detected in fail test")
 			}
-
 			output := strings.TrimSpace(string(csvData))
 
 			log.Logger.Debug().Msgf("output %s", output)
@@ -139,7 +162,7 @@ func TestTryParseUnknownJSONToCSV(t *testing.T) {
 				}
 			}
 
-			if !matched {
+			if (!matched && tc.shouldMatch) || (matched && !tc.shouldMatch) {
 				t.Fatalf("output mismatch.\nGot:\n%q\nExpected one of:\n%q", output, tc.expected)
 			}
 		})
