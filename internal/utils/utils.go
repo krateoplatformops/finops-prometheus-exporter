@@ -74,7 +74,10 @@ func ReplaceVariables(text string, additionalVariables map[string]string) string
 		varName := text[toReplaceRange[0]+1 : toReplaceRange[1]-1]
 
 		// Get replacement value from additionalVariables
-		varToReplace := additionalVariables[varName]
+		varToReplace, ok := additionalVariables[varName]
+		if !ok {
+			log.Warn().Msgf("did not find additionalVariable with key %s", varName)
+		}
 
 		// If the variable name is all uppercase, get value from environment
 		if varToReplace == strings.ToUpper(varToReplace) {

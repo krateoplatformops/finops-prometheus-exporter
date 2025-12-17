@@ -96,7 +96,7 @@ func makeAPIRequest(config finopsdatatypes.ExporterScraperConfig, endpoint *endp
 
 		if res.Code != 200 {
 			log.Warn().Msgf("Received status code %d", res.Code)
-			log.Warn().Msgf("Body %s", string(bodyData))
+			log.Warn().Msgf("Error - Body: %s", res.Message)
 
 			log.Logger.Warn().Msgf("Retrying connection in 5s...")
 			time.Sleep(5 * time.Second)
